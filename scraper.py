@@ -647,7 +647,15 @@ class FoodiBDScraper:
         ph_dir = pq_dir / "price_history"
         ph_dir.mkdir(exist_ok=True)
         ph_path = ph_dir / f"date={today}.parquet"
-        tbl = Table.from_pylist([{k: v for k, v in p.items() if k != "max_qty_per_order" and k != "variations_json" and k != "policy_json"} for p in products], schema=PRICE_SCHEMA)
+        rows = [
+            {
+                k: v for k, v in p.items()
+                if k not in ("max_qty_per_order", "variations_json", "policy_json")
+            }
+            | {"scraped_at": self.now}
+            for p in products
+        ]
+        tbl = Table.from_pylist(rows, schema=PRICE_SCHEMA)
         parquet.write_table(tbl, ph_path, compression="snappy")
         log.info(f"Wrote {len(products)} rows to {ph_path}")
 

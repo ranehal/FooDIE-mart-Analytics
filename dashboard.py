@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 import yaml
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -421,33 +422,116 @@ def parquet_products(category: Optional[int] = None, limit: int = 500):
 
 
 @app.get("/api/parquet/price-history/{product_id}")
-def parquet_price_history(product_id: int, days: int = 90):
-    """Read price history from Parquet partitions — much faster than SQLite for date-range scans."""
+def parquet_price_history(product_id: int, days: int = 365):
+    """Read price history from Parquet partitions and return steamdb-style stats.
+
+    Note: parquet rows carry the date in the partition filename (date=YYYY-MM-DD.parquet);
+    the scraped_at column is populated from that when the column is null.
+    """
     try:
         import pyarrow.parquet as pq
-        import pyarrow.compute as pc
         ph_dir = PARQUET_DIR / "price_history"
         if not ph_dir.exists():
             return JSONResponse({"error": "No parquet price history found", "data": []}, status_code=404)
 
         cutoff = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
-        tables = []
+        frames = []
         for f in sorted(ph_dir.glob("date=*.parquet")):
             date_str = f.stem.split("=")[1] if "=" in f.stem else ""
             if date_str < cutoff:
                 continue
             t = pq.read_table(f, filters=[("product_id", "=", product_id)])
-            if len(t) > 0:
-                tables.append(t)
+            if len(t) == 0:
+                continue
+            df = t.to_pandas()
+            # Recover timestamp from partition date when column is null
+            if df["scraped_at"].isna().all():
+                df = df.copy()
+                df.loc[:, "scraped_at"] = pd.Timestamp(date_str + "T23:59:59")
+            frames.append(df)
 
-        if not tables:
-            return {"product_id": product_id, "source": "parquet", "data": []}
+        if not frames:
+            return {"product_id": product_id, "source": "parquet", "data": [], "stats": None}
 
-        combined = pq.concat_tables(tables)
-        df = combined.to_pandas().sort_values("scraped_at")
-        return {"product_id": product_id, "source": "parquet", "data": df.to_dict(orient="records")}
+        df = pd.concat(frames).sort_values("scraped_at").drop_duplicates("scraped_at").reset_index(drop=True)
+
+        points = df["discounted_price"].tolist()
+        if points:
+            low_ts = df.loc[df["discounted_price"].idxmin(), "scraped_at"]
+            high_ts = df.loc[df["discounted_price"].idxmax(), "scraped_at"]
+            low_ts = low_ts if isinstance(low_ts, str) else low_ts.isoformat()
+            high_ts = high_ts if isinstance(high_ts, str) else high_ts.isoformat()
+        else:
+            low_ts = high_ts = None
+        stats = {
+            "current": float(points[-1]) if points else None,
+            "low": float(min(points)) if points else None,
+            "low_date": low_ts,
+            "high": float(max(points)) if points else None,
+            "high_date": high_ts,
+            "avg": round(float(df["discounted_price"].mean()), 2) if points else None,
+            "median": round(float(df["discounted_price"].median()), 2) if points else None,
+            "points": len(points),
+            "days_tracked": int((df["scraped_at"].max() - df["scraped_at"].min()).days) if points else 0,
+            "change_7d": _pct_change(df, 7),
+            "change_30d": _pct_change(df, 30),
+        }
+        return {"product_id": product_id, "source": "parquet", "stats": stats, "data": df.to_dict(orient="records")}
     except Exception as e:
         return JSONResponse({"error": str(e), "data": []}, status_code=500)
+
+
+def _pct_change(df, days):
+    """% change between earliest and latest price in the trailing `days` window."""
+    if len(df) < 2:
+        return None
+    end = df["scraped_at"].max()
+    start = end - timedelta(days=days)
+    window = df[df["scraped_at"] >= start]
+    if len(window) < 2:
+        return None
+    first, last = window.iloc[0]["discounted_price"], window.iloc[-1]["discounted_price"]
+    if not first:
+        return None
+    return round((last - first) / first * 100, 2)
+
+
+@app.get("/api/top-movers")
+def top_movers(limit: int = 25):
+    """Biggest price changes between the last two distinct snapshot days."""
+    db = get_db()
+    rows = db.execute("""
+        WITH last AS (
+            SELECT product_id, name, category_name, image_path,
+                   discounted_price, MAX(scraped_at) AS ts
+            FROM price_history
+            WHERE DATE(scraped_at) = (SELECT MAX(DATE(scraped_at)) FROM price_history)
+            GROUP BY product_id
+        ),
+        prev AS (
+            SELECT product_id, discounted_price, MAX(scraped_at) AS ts
+            FROM price_history
+            WHERE DATE(scraped_at) = (
+                SELECT MAX(DATE(scraped_at)) FROM price_history
+                WHERE DATE(scraped_at) < (SELECT MAX(DATE(scraped_at)) FROM price_history)
+            )
+            GROUP BY product_id
+        )
+        SELECT l.product_id, l.name, l.category_name, l.image_path,
+               p.discounted_price as old_price, l.discounted_price as new_price,
+               p.ts as old_date
+        FROM last l
+        JOIN prev p ON l.product_id = p.product_id
+        WHERE l.discounted_price != p.discounted_price
+        ORDER BY ABS(l.discounted_price - p.discounted_price) DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    db.close()
+    out = [dict(r) for r in rows]
+    for o in out:
+        o["price_diff"] = round(o["new_price"] - o["old_price"], 2)
+        o["pct"] = round(o["price_diff"] / o["old_price"] * 100, 2) if o["old_price"] else None
+    return out
 
 
 @app.get("/api/parquet/stats")
