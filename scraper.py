@@ -107,6 +107,15 @@ PRODUCTS_SCHEMA = schema([
 # SQLite setup
 # ---------------------------------------------------------------------------
 def init_db(db_path: Path) -> sqlite3.Connection:
+    p = Path(db_path)
+    if not p.exists():
+        parts = sorted(p.parent.glob(f"{p.name}.part*"))
+        if parts:
+            log.info(f"Reassembling {p.name} from {len(parts)} part files...")
+            with open(p, "wb") as out_f:
+                for part in parts:
+                    with open(part, "rb") as in_f:
+                        out_f.write(in_f.read())
     conn = sqlite3.connect(str(db_path))
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS products (

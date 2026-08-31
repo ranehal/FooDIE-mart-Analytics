@@ -14,9 +14,9 @@ __pycache__/
 *.pyd
 
 # Logs & temp files
-*.log
-data/logs/
-scratch/
+# Large SQLite DB (> 100MB) - use split .part files instead
+data/scraper.db
+!data/scraper.db.part*
 
 # IDE files
 .vscode/

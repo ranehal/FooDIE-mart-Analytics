@@ -33,6 +33,14 @@ _scraper_status = {"running": False, "last_output": "", "pid": None, "started_at
 
 
 def get_db():
+    p = Path(DB_PATH)
+    if not p.exists():
+        parts = sorted(p.parent.glob(f"{p.name}.part*"))
+        if parts:
+            with open(p, "wb") as out_f:
+                for part in parts:
+                    with open(part, "rb") as in_f:
+                        out_f.write(in_f.read())
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
