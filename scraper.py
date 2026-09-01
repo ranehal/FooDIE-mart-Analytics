@@ -43,11 +43,14 @@ for d in [OUT["parquet_dir"], OUT["logs_dir"], BASE / "data"]:
 LASTRUN_LOG = BASE / OUT["logs_dir"] / "lastrun.log"
 LASTRUN_LOG.parent.mkdir(parents=True, exist_ok=True)
 
-# Force UTF-8 on Windows console
-if sys.platform == "win32":
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+# Force UTF-8 safely without closing underlying stream
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
